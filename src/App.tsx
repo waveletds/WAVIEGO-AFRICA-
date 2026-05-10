@@ -91,6 +91,8 @@ export default function App() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   
   const [showFundModal, setShowFundModal] = useState(false);
+  const [fundAmount, setFundAmount] = useState("");
+  const [isFunding, setIsFunding] = useState(false);
   
   // KYC State
   const [kycStep, setKycStep] = useState<string>("init");
@@ -107,7 +109,8 @@ export default function App() {
   const [kycLoading, setKycLoading] = useState(false);
   const [kycError, setKycError] = useState("");
   const [kycDemoOtp, setKycDemoOtp] = useState<string | null>(null);
-  const [apiStatus, setApiStatus] = useState({ gemini: false, monnify: false, twilio: false });
+  const [isLogin, setIsLogin] = useState(false);
+  const [apiStatus, setApiStatus] = useState({ gemini: false, monnify: false, paystack: false, twilio: false });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const receiptRef = useRef<HTMLDivElement>(null);
@@ -193,18 +196,43 @@ export default function App() {
   const fetchUserData = async () => {
     try {
       const res = await fetch("/api/user");
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new TypeError("Oops, we didn't get JSON!");
+      if (res.status === 404) {
+        setUserData(null);
+        setKycStep("init");
+        return;
       }
       const data = await res.json();
       setUserData(data);
       if (!data.kyc_completed) {
         setKycStep(data.kyc_step || "phone_input");
+        if (data.phone) setKycPhone(data.phone);
+        if (data.fullname) setKycFullname(data.fullname);
+        if (data.email) setKycEmail(data.email);
+        if (data.dob) setKycDob(data.dob);
+        if (data.address) setKycAddress(data.address);
+        if (data.state) setKycState(data.state);
+      } else {
+        setKycStep("completed");
       }
     } catch (err) {
       console.error("Failed to fetch user data", err);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await fetch("/api/logout", { method: "POST" });
+      setUserData(null);
+      setKycStep("init");
+      setMessages([{
+        id: "1",
+        text: "Welcome to Waviego Africa! I am your AI banking assistant. How can I help you today?",
+        sender: "ai",
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: "read"
+      }]);
+    } catch (err) {
+      console.error("Logout failed", err);
     }
   };
 
@@ -354,6 +382,59 @@ export default function App() {
     } finally {
       setKycLoading(false);
     }
+  };
+
+  const handlePaystackPayment = () => {
+    if (!fundAmount || Number(fundAmount) < 100) {
+      alert("Please enter a valid amount (Min ₦100)");
+      return;
+    }
+
+    const publicKey = (import.meta as any).env.VITE_PAYSTACK_PUBLIC_KEY;
+    if (!publicKey) {
+      alert("Paystack is not configured. Please add VITE_PAYSTACK_PUBLIC_KEY to your settings.");
+      return;
+    }
+
+    setIsFunding(true);
+
+    const handler = (window as any).PaystackPop.setup({
+      key: publicKey,
+      email: userData?.email || "customer@waviego.africa",
+      amount: Number(fundAmount) * 100, // Amount in kobo
+      currency: "NGN",
+      ref: `WVG_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      callback: async (response: any) => {
+        console.log("Paystack Payment Successful:", response);
+        try {
+          const verifyRes = await fetch("/api/paystack/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: response.reference })
+          });
+          const data = await verifyRes.json();
+          if (verifyRes.ok) {
+            setUserData(prev => prev ? { ...prev, wallet_balance: data.balance } : null);
+            setShowFundModal(false);
+            setFundAmount("");
+            alert("Payment Successful! Your wallet has been credited.");
+            fetchTransactions();
+          } else {
+            alert("Payment verification failed: " + data.error);
+          }
+        } catch (err) {
+          alert("Error verifying payment");
+        } finally {
+          setIsFunding(false);
+        }
+      },
+      onClose: () => {
+        setIsFunding(false);
+        console.log("Paystack Window Closed");
+      }
+    });
+
+    handler.openIframe();
   };
 
   const fetchTransactions = async () => {
@@ -539,19 +620,29 @@ export default function App() {
               </div>
             </div>
 
-            <h2 className="text-3xl font-display font-bold text-center mb-2 tracking-tight text-white">Waviego Onboarding</h2>
-            <p className="text-center text-white/40 text-xs mb-10 uppercase tracking-[0.2em] font-black">AI-Powered Banking Setup</p>
+            <h2 className="text-3xl font-display font-bold text-center mb-2 tracking-tight text-white">
+              {isLogin ? "Welcome Back" : "Waviego Onboarding"}
+            </h2>
+            <p className="text-center text-white/40 text-[10px] mb-10 uppercase tracking-[0.2em] font-black">
+              {isLogin ? "Secure Vault Access" : "AI-Powered Banking Setup"}
+            </p>
 
-            {kycStep === "phone_input" && (
+            {(kycStep === "init" || kycStep === "phone_input") && (
               <div className="space-y-6">
+                <p className="text-center text-white/60 text-sm mb-4 leading-relaxed px-4">
+                  {isLogin 
+                    ? "Enter your registered phone number to access your Waviego account."
+                    : "To start using Waviego Africa, we need to verify your identity and set up your secure banking environment."
+                  }
+                </p>
                 <div>
-                  <label className="text-[10px] font-black uppercase text-emerald-500 mb-2 block">Phone Number</label>
+                  <label className="text-[10px] font-black uppercase text-emerald-500 mb-2 block tracking-widest pl-1">Phone Number</label>
                   <input 
                     type="tel"
                     value={kycPhone}
-                    onChange={(e) => setKycPhone(e.target.value)}
+                    onChange={(e) => setKycPhone(e.target.value.replace(/\s/g, ''))}
                     placeholder="e.g. +234 800 000 0000"
-                    className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:border-emerald-500/50 transition-all"
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white outline-none focus:border-emerald-500/50 transition-all font-mono"
                   />
                 </div>
                 <button 
@@ -559,8 +650,17 @@ export default function App() {
                   disabled={kycLoading || !kycPhone}
                   className="w-full py-5 bg-emerald-500 text-black rounded-2xl font-black uppercase tracking-[0.2em] text-[10px] shadow-xl shadow-emerald-500/20 disabled:opacity-50"
                 >
-                  {kycLoading ? "Initializing..." : "Verify Number"}
+                  {kycLoading ? "Authorizing..." : (isLogin ? "Sign In" : "Get Started")}
                 </button>
+                
+                <div className="flex items-center justify-center pt-4">
+                  <button 
+                    onClick={() => setIsLogin(!isLogin)}
+                    className="text-[10px] font-black uppercase tracking-widest text-emerald-500/60 hover:text-emerald-500 transition-colors"
+                  >
+                    {isLogin ? "Need a new account? Register" : "Already have an account? Login"}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -740,19 +840,21 @@ export default function App() {
               <p className="mt-6 text-rose-500 text-[10px] font-bold text-center uppercase tracking-widest">{kycError}</p>
             )}
 
-            <div className="mt-10 flex items-center justify-center gap-3 opacity-30">
-               {[ "Phone", "OTP", "Info", "ID", "Addr", "PIN" ].map((step, idx) => {
-                 const stepMapping = ["phone_input", "otp_verification", "personal_info", "identity_verification", "address_verification", "pin_creation"];
-                 const currentIdx = stepMapping.indexOf(kycStep);
-                 const isActive = idx <= currentIdx;
-                 return (
-                   <React.Fragment key={step}>
-                     <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-500' : 'bg-white/20'}`} />
-                     {idx < 5 && <div className={`w-6 h-[1px] ${idx < currentIdx ? 'bg-emerald-500' : 'bg-white/10'}`} />}
-                   </React.Fragment>
-                 )
-               })}
-            </div>
+            {kycStep !== "init" && (
+              <div className="mt-10 flex items-center justify-center gap-3 opacity-30">
+                {[ "Phone", "OTP", "Info", "ID", "Addr", "PIN" ].map((step, idx) => {
+                  const stepMapping = ["phone_input", "otp_verification", "personal_info", "identity_verification", "address_verification", "pin_creation"];
+                  const currentIdx = stepMapping.indexOf(kycStep);
+                  const isActive = idx <= currentIdx;
+                  return (
+                    <React.Fragment key={step}>
+                      <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-500' : 'bg-white/20'}`} />
+                      {idx < 5 && <div className={`w-6 h-[1px] ${idx < currentIdx ? 'bg-emerald-500' : 'bg-white/10'}`} />}
+                    </React.Fragment>
+                  )
+                })}
+              </div>
+            )}
           </motion.div>
         </div>
       ) : (
@@ -906,17 +1008,18 @@ export default function App() {
                     <div className={`w-1.5 h-1.5 rounded-full ${apiStatus.twilio ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-blue-500'}`} />
                     <span className="text-[9px] font-bold text-white/50">SMS</span>
                   </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className={`w-1.5 h-1.5 rounded-full ${apiStatus.paystack ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-purple-500'}`} />
+                    <span className="text-[9px] font-bold text-white/50">PAY</span>
+                  </div>
                 </div>
              </div>
 
              <button 
-                onClick={async () => {
-                  await fetch("/api/kyc/reset", { method: "POST" });
-                  fetchUserData();
-                }}
-                className="mt-4 w-full py-2 border border-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest text-white/20 hover:text-emerald-500 hover:border-emerald-500 hover:bg-emerald-500/5 transition-all"
+                onClick={logout}
+                className="mt-4 w-full py-2 border border-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest text-white/20 hover:text-rose-500 hover:border-rose-500 hover:bg-rose-500/5 transition-all"
              >
-                Reset Account (Demo Onboarding)
+                Logout / New Registration
              </button>
           </div>
         </aside>
@@ -1276,9 +1379,39 @@ export default function App() {
               </div>
 
               <div className="p-8 pt-4">
-                <div className="mb-8 flex flex-col items-center bg-emerald-500/5 border border-emerald-500/10 rounded-3xl p-6 relative overflow-hidden">
+                <div className="mb-6">
+                  <label className="text-[10px] font-black uppercase text-emerald-500/60 mb-2 block tracking-widest text-center">Amount to Fund (₦)</label>
+                  <input 
+                    type="number"
+                    value={fundAmount}
+                    onChange={(e) => setFundAmount(e.target.value)}
+                    placeholder="Enter amount (e.g. 5000)"
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 text-white text-center text-2xl font-bold outline-none focus:border-emerald-500/50 transition-all"
+                  />
+                </div>
+
+                <button 
+                  onClick={handlePaystackPayment}
+                  disabled={isFunding || !fundAmount}
+                  className="w-full py-5 bg-emerald-500 text-black rounded-2xl font-black uppercase tracking-[0.2em] text-[10px] shadow-xl shadow-emerald-500/20 mb-8 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isFunding ? "Processing..." : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      Pay with Card/Transfer
+                    </>
+                  )}
+                </button>
+
+                <div className="flex items-center gap-4 mb-8 opacity-20">
+                  <div className="h-[1px] flex-1 bg-white" />
+                  <span className="text-[9px] font-black uppercase tracking-widest">OR USE BANK TRANSFER</span>
+                  <div className="h-[1px] flex-1 bg-white" />
+                </div>
+
+                <div className="mb-8 flex flex-col items-center bg-white/5 border border-white/10 rounded-3xl p-6 relative overflow-hidden">
                    <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-500/20 blur-[40px] -mr-10 -mt-10" />
-                   <p className="text-[10px] font-black uppercase tracking-widest text-emerald-500/60 mb-6">Bank Transfer Details</p>
+                   <p className="text-[10px] font-black uppercase tracking-widest text-emerald-500/60 mb-6 font-mono">Reserved Account</p>
                    
                    <div className="w-full space-y-6">
                       <div className="flex flex-col items-center">

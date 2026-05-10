@@ -1,64 +1,71 @@
 {
   "entities": {
     "User": {
-      "title": "User",
-      "description": "User profile and balance information",
+      "title": "User Profile",
+      "description": "Core user account and banking details",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "phone": { "type": "string" },
         "fullname": { "type": "string" },
-        "wallet_balance": { "type": "number" },
+        "email": { "type": "string", "format": "email" },
+        "dob": { "type": "string" },
+        "address": { "type": "string" },
+        "state": { "type": "string" },
+        "bvn": { "type": "string" },
         "pin": { "type": "string" },
+        "wallet_balance": { "type": "number" },
         "virtual_bank": { "type": "string" },
         "virtual_account": { "type": "string" },
         "virtual_account_name": { "type": "string" },
         "kyc_completed": { "type": "boolean" },
-        "kyc_step": { "type": "string", "enum": ["phone_input", "otp_verification", "identity_verification", "pin_creation", "completed"] },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "kyc_step": { "type": "string" },
+        "kyc_id_type": { "type": "string" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["phone", "wallet_balance", "kyc_completed"]
     },
     "Transaction": {
-      "title": "Transaction",
-      "description": "Financial transaction record",
+      "title": "Transaction Record",
+      "description": "Financial transaction history",
       "type": "object",
       "properties": {
-        "userId": { "type": "string" },
-        "type": { "type": "string", "enum": ["transfer", "vtu", "deposit"] },
+        "type": { "type": "string", "enum": ["deposit", "transfer", "vtu"] },
         "amount": { "type": "number" },
         "recipient": { "type": "string" },
+        "status": { "type": "string", "enum": ["success", "pending", "failed"] },
+        "provider": { "type": "string" },
+        "reference": { "type": "string" },
         "network": { "type": "string" },
         "phone": { "type": "string" },
         "itemType": { "type": "string" },
-        "status": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["type", "amount", "status", "created_at"]
     },
     "OTP": {
-      "title": "OTP",
-      "description": "One-time password for verification",
+      "title": "One-Time Password",
+      "description": "Temporary verification codes",
       "type": "object",
       "properties": {
         "code": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
-      }
+      },
+      "required": ["code", "createdAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
-      "schema": "User",
-      "description": "User profile document"
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Individual user accounts"
     },
     "/users/{userId}/transactions/{transactionId}": {
-      "schema": "Transaction",
-      "description": "User's transaction history"
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "User transaction history"
     },
     "/otps/{phone}": {
-      "schema": "OTP",
-      "description": "Temporary OTP storage"
+      "schema": { "$ref": "#/entities/OTP" },
+      "description": "Phone verification records"
     }
   }
 }
