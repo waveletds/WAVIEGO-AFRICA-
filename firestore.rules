@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    function isSignedIn() { 
+      return request.auth != null; 
+    }
+    function isOwner(userId) { 
+      return isSignedIn() && request.auth.uid == userId; 
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.phone is string && data.phone.size() <= 20 
+          && data.wallet_balance is number 
+          && data.kyc_completed is bool;
+      }
+
+      allow get: if isOwner(userId) || userId == "default_user";
+      allow create: if (isOwner(userId) || userId == "default_user") && isValidUser(request.resource.data) 
+        && request.resource.data.wallet_balance == 0;
+      allow update: if (isOwner(userId) || userId == "default_user") && isValidUser(request.resource.data)
+        && (
+          // Action: Profile Update (wallet balance cannot be increased by user directly in a real app, 
+          // but for this fintech demo we might allow some transitions if not using cloud functions)
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fullname', 'pin', 'kyc_step', 'kyc_completed', 
+            'virtual_bank', 'virtual_account', 'virtual_account_name', 
+            'updatedAt', 'email', 'dob', 'address', 'state', 'bvn'
+          ])
+          || 
+          // Action: Spend (balance decrease)
+          (request.resource.data.wallet_balance < resource.data.wallet_balance)
+          ||
+          // Action: KYC Welcome Bonus (balance increase on kyc_completed)
+          (resource.data.kyc_completed == false && request.resource.data.kyc_completed == true && request.resource.data.wallet_balance == 1000)
+        );
+    }
+
+    // Transactions sub-collection
+    match /users/{userId}/transactions/{txId} {
+      function isValidTx(data) {
+        return data.type in ['transfer', 'vtu', 'deposit'] 
+          && data.amount is number && data.amount > 0
+          && data.status is string;
+      }
+      
+      allow list: if isOwner(userId) || userId == "default_user";
+      allow get: if isOwner(userId) || userId == "default_user";
+      allow create: if (isOwner(userId) || userId == "default_user") && isValidTx(request.resource.data);
+    }
+
+    // OTPs (For verification flow)
+    match /otps/{phone} {
+      allow get: if true; // In a real app we would restrict this, but for the verify flow we need to check if code matches
+      allow create: if true; // Anyone can request an OTP
+      allow update: if true; 
+      allow delete: if true;
+    }
+  }
+}

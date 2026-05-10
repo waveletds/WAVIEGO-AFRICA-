@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and balance information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "phone": { "type": "string" },
+        "fullname": { "type": "string" },
+        "wallet_balance": { "type": "number" },
+        "pin": { "type": "string" },
+        "virtual_bank": { "type": "string" },
+        "virtual_account": { "type": "string" },
+        "virtual_account_name": { "type": "string" },
+        "kyc_completed": { "type": "boolean" },
+        "kyc_step": { "type": "string", "enum": ["phone_input", "otp_verification", "identity_verification", "pin_creation", "completed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["phone", "wallet_balance", "kyc_completed"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial transaction record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["transfer", "vtu", "deposit"] },
+        "amount": { "type": "number" },
+        "recipient": { "type": "string" },
+        "network": { "type": "string" },
+        "phone": { "type": "string" },
+        "itemType": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "amount", "status", "created_at"]
+    },
+    "OTP": {
+      "title": "OTP",
+      "description": "One-time password for verification",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document"
+    },
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "User's transaction history"
+    },
+    "/otps/{phone}": {
+      "schema": "OTP",
+      "description": "Temporary OTP storage"
+    }
+  }
+}
