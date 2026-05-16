@@ -128,8 +128,8 @@ export default function App() {
 
     const testConnection = async () => {
       try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
-        console.log("Database Online");
+        // await getDocFromServer(doc(db, 'test', 'connection'));
+        // console.log("Database Online");
       } catch (error) {
         // Suppress benign connection logs
       }
@@ -196,7 +196,7 @@ export default function App() {
   const fetchUserData = async () => {
     console.log("[App] Fetching user data...");
     try {
-      const res = await fetch("/api/user", { credentials: 'include' });
+      const res = await fetch("/api/user");
       if (res.status === 401 || res.status === 404) {
         console.log("[App] User not found or unauthorized");
         setUserData(null);
@@ -249,12 +249,15 @@ export default function App() {
     }
   };
 
-  const cleanPhone = (p: string) => p.replace(/\D/g, '');
+  const cleanPhone = (p: any) => {
+    if (typeof p !== 'string') return '';
+    return p.replace(/\D/g, '');
+  };
 
   const startKyc = async () => {
     const cleanedPhone = cleanPhone(kycPhone);
-    if (!cleanedPhone) {
-      setKycError("Please enter a valid phone number");
+    if (!cleanedPhone || cleanedPhone.length < 5) {
+      setKycError("Please enter a valid phone number (at least 5 digits)");
       return;
     }
     setKycLoading(true);
@@ -264,8 +267,7 @@ export default function App() {
       const res = await fetch("/api/kyc/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanedPhone }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanedPhone })
       });
       const data = await res.json();
       if (res.ok) {
@@ -282,7 +284,8 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("[KYC] Fetch error:", err);
-      setKycError(`Connection error: ${err.message || "Failed to contact server"}`);
+      const errorMsg = err.message || JSON.stringify(err);
+      setKycError(`Connection error: ${errorMsg}`);
     } finally {
       setKycLoading(false);
     }
@@ -297,8 +300,7 @@ export default function App() {
       const res = await fetch("/api/kyc/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanedPhone, otp: kycOtp }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanedPhone, otp: kycOtp })
       });
       const data = await res.json();
       if (res.ok) {
@@ -325,8 +327,7 @@ export default function App() {
       const res = await fetch("/api/kyc/personal-info", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanPhone(kycPhone), fullname: kycFullname, email: kycEmail, dob: kycDob }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), fullname: kycFullname, email: kycEmail, dob: kycDob })
       });
       const data = await res.json();
       if (res.ok) {
@@ -353,8 +354,7 @@ export default function App() {
       const res = await fetch("/api/kyc/verify-identity", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanPhone(kycPhone), idType: kycIdType, idNumber: kycIdNumber }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), idType: kycIdType, idNumber: kycIdNumber })
       });
       const data = await res.json();
       if (res.ok) {
@@ -381,8 +381,7 @@ export default function App() {
       const res = await fetch("/api/kyc/address-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanPhone(kycPhone), address: kycAddress, state: kycState }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), address: kycAddress, state: kycState })
       });
       const data = await res.json();
       if (res.ok) {
@@ -405,8 +404,7 @@ export default function App() {
       const res = await fetch("/api/kyc/set-pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: cleanPhone(kycPhone), pin: kycPin }),
-        credentials: 'include'
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), pin: kycPin })
       });
       const data = await res.json();
       if (res.ok) {
@@ -778,10 +776,10 @@ export default function App() {
                 <div>
                   <label className="text-[10px] font-black uppercase text-yellow-dark mb-2 block tracking-widest pl-1">Phone Number</label>
                   <input 
-                    type="tel"
+                    type="text"
                     value={kycPhone}
-                    onChange={(e) => setKycPhone(e.target.value.replace(/\s/g, ''))}
-                    placeholder="e.g. +234 800 000 0000"
+                    onChange={(e) => setKycPhone(e.target.value)}
+                    placeholder="e.g. 0800 000 0000"
                     className="w-full bg-black/[0.03] border border-black/[0.05] rounded-2xl py-4 px-6 text-black outline-none focus:border-yellow/50 transition-all font-mono"
                   />
                 </div>
