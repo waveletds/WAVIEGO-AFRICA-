@@ -164,6 +164,14 @@ async function startServer() {
     }
   }));
 
+  // Request logger
+  app.use((req, res, next) => {
+    if (req.url.startsWith('/api')) {
+      console.log(`[API Request] ${req.method} ${req.url}`);
+    }
+    next();
+  });
+
   // API Routes
   const getUserId = (req: any) => req.cookies.user_id || "unauthenticated";
 
@@ -788,6 +796,7 @@ async function startServer() {
     const newBalance = user?.wallet_balance + Number(amount);
     const tx = {
       type: "deposit",
+      category: "credit",
       amount,
       recipient: "Self",
       status: "success",
@@ -830,6 +839,7 @@ async function startServer() {
         const newBalance = (user?.wallet_balance || 0) + amount;
         const tx = {
           type: "deposit",
+          category: "credit",
           amount,
           recipient: "Self",
           status: "success",
@@ -881,6 +891,7 @@ async function startServer() {
           const newBalance = (user?.wallet_balance || 0) + amount;
           const tx = {
             type: "deposit",
+            category: "credit",
             amount,
             recipient: "Self",
             status: "success",
@@ -935,6 +946,7 @@ async function startServer() {
           const newBalance = (user?.wallet_balance || 0) + amount;
           const tx = {
             type: "deposit",
+            category: "credit",
             amount,
             recipient: "Self",
             status: "success",
@@ -952,6 +964,12 @@ async function startServer() {
 
     res.status(200).send("OK");
   }));
+
+  // Specific API 404 handler to prevent fallthrough to SPA proxy for missing API routes
+  app.use("/api/*", (req, res) => {
+    console.warn(`[API 404] Route not found: ${req.method} ${req.originalUrl}`);
+    res.status(404).json({ error: "API Route not found" });
+  });
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {

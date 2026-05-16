@@ -35,6 +35,8 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { toPng } from "html-to-image";
 import { Receipt } from "./components/Receipt";
+import { Statement } from "./components/Statement";
+import { useReactToPrint } from "react-to-print";
 import { doc, getDocFromServer } from 'firebase/firestore';
 import { db } from './lib/firebase';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -91,6 +93,8 @@ export default function App() {
   const [selectedTxDetail, setSelectedTxDetail] = useState<any | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [showStatement, setShowStatement] = useState(false);
+  const statementRef = useRef<HTMLDivElement>(null);
   
   const [showFundModal, setShowFundModal] = useState(false);
   const [fundAmount, setFundAmount] = useState("");
@@ -184,59 +188,81 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
-  const safeFetch = async (path: string, options: RequestInit = {}) => {
+  const safeFetch = async (path: string, options: RequestInit & { throwOnError?: boolean } = {}) => {
+    const { throwOnError = true, ...fetchOptions } = options;
     try {
-      // Use absolute path constructed manually to avoid URL constructor issues if origin is tricky
-      const origin = window.location.origin;
-      const url = path.startsWith('http') ? path : `${origin}${path}`;
+      console.log(`[Fetch] Requesting: ${path}`, fetchOptions.method || 'GET');
       
-      console.log(`[Fetch] Requesting: ${url}`, options.method || 'GET');
-      
-      // Ensure credentials: 'include' is set for session persistence if needed, 
-      // though same-origin fetch usually includes cookies by default.
-      // But let's be explicit and allow overrides.
-      const fetchOptions: RequestInit = {
-        ...options,
-        credentials: options.credentials || 'same-origin'
+      const config: RequestInit = {
+        ...fetchOptions,
+        credentials: fetchOptions.credentials || 'same-origin'
       };
 
-      const res = await fetch(url, fetchOptions);
+      const res = await fetch(path, config);
       console.log(`[Fetch] Response ${res.status} for ${path}`);
+      
+      if (!res.ok && throwOnError) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+           const errData = await res.json();
+           throw new Error(errData.error || errData.message || `Status ${res.status}`);
+        } else {
+           const text = await res.text();
+           throw new Error(`Server Error: ${res.status} - ${text.slice(0, 50)}`);
+        }
+      }
+
       return res;
     } catch (err: any) {
-      console.error(`[Fetch] Critical error for ${path}:`, err);
-      // Construct a more useful error object
-      const errorMsg = err.message || "Network request failed";
-      const diagnosticErr = new Error(`Connection error: ${errorMsg}`);
-      (diagnosticErr as any).path = path;
-      (diagnosticErr as any).diagnostic = JSON.stringify(err);
-      throw diagnosticErr;
+      if (throwOnError) {
+        console.error(`[Fetch] Critical error for ${path}:`, err);
+        const errorMsg = err.message || "Network request failed";
+        const diagnosticErr = new Error(errorMsg);
+        (diagnosticErr as any).path = path;
+        (diagnosticErr as any).diagnostic = err.stack || JSON.stringify(err);
+        throw diagnosticErr;
+      }
+      // If we don't throw, we return a mock response that looks like a fetch error
+      return {
+        ok: false,
+        status: 0,
+        json: async () => ({ error: err.message }),
+        text: async () => err.message
+      } as any;
     }
   };
 
   const fetchUserData = async () => {
     console.log("[App] Fetching user data...");
     try {
-      const res = await safeFetch("/api/user");
-      if (res.status === 401 || res.status === 404) {
-        console.log("[App] User not found or unauthorized");
+      const res = await safeFetch("/api/user", { throwOnError: false });
+      if (res.status === 401 || res.status === 404 || !res.ok) {
+        console.log("[App] User not found, unauthorized or server error:", res.status);
         setUserData(null);
         setKycStep("init");
         return;
       }
-      const data = await res.json();
-      console.log("[App] User data received:", data.phone);
-      setUserData(data);
-      if (!data.kyc_completed) {
-        setKycStep(data.kyc_step || "phone_input");
-        if (data.phone) setKycPhone(data.phone);
-        if (data.fullname) setKycFullname(data.fullname);
-        if (data.email) setKycEmail(data.email);
-        if (data.dob) setKycDob(data.dob);
-        if (data.address) setKycAddress(data.address);
-        if (data.state) setKycState(data.state);
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await res.json();
+        console.log("[App] User data received:", data.phone);
+        setUserData(data);
+        if (!data.kyc_completed) {
+          setKycStep(data.kyc_step || "phone_input");
+          if (data.phone) setKycPhone(data.phone);
+          if (data.fullname) setKycFullname(data.fullname);
+          if (data.email) setKycEmail(data.email);
+          if (data.dob) setKycDob(data.dob);
+          if (data.address) setKycAddress(data.address);
+          if (data.state) setKycState(data.state);
+        } else {
+          setKycStep("completed");
+        }
       } else {
-        setKycStep("completed");
+        console.warn("[App] Received non-JSON response for user data");
+        setUserData(null);
+        setKycStep("init");
       }
     } catch (err) {
       console.error("[App] Failed to fetch user data", err);
@@ -291,23 +317,16 @@ export default function App() {
         body: JSON.stringify({ phone: cleanedPhone })
       });
       const data = await res.json();
-      if (res.ok) {
-        console.log("[KYC] Start successful, next step:", data.step);
-        setKycStep(data.step);
-        if (data.demo_otp) {
-          setKycDemoOtp(data.demo_otp);
-        } else {
-          setKycDemoOtp(null);
-        }
+      console.log("[KYC] Start successful, next step:", data.step);
+      setKycStep(data.step);
+      if (data.demo_otp) {
+        setKycDemoOtp(data.demo_otp);
       } else {
-        console.error("[KYC] Start failed:", data.error || "Unknown error");
-        setKycError(data.error || "Failed to start KYC. Please try again.");
+        setKycDemoOtp(null);
       }
     } catch (err: any) {
-      console.error("[KYC] Fetch error:", err);
-      const errorMsg = err.message || "Network request failed";
-      const diagnostic = err.diagnostic ? ` (Info: ${err.diagnostic})` : "";
-      setKycError(`Connection Error: ${errorMsg}${diagnostic}`);
+      console.error("[KYC] Start error:", err);
+      setKycError(err.message || "Failed to start KYC. Please try again.");
     } finally {
       setKycLoading(false);
     }
@@ -591,6 +610,11 @@ export default function App() {
     }
   };
 
+  const handlePrintStatement = useReactToPrint({
+    contentRef: statementRef,
+    documentTitle: `Statement_${userData?.fullname || 'Customer'}_${new Date().toLocaleDateString()}`
+  });
+
   const handleSendMessage = async () => {
     if (!input.trim() && !selectedImage) return;
 
@@ -613,12 +637,7 @@ export default function App() {
 
     try {
       console.log("[AI] Initializing Gemini on frontend...");
-      const apiKey = (process as any).env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Gemini API key is not configured in the environment.");
-      }
-
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({ apiKey: (process as any).env.GEMINI_API_KEY });
       const modelName = "gemini-3-flash-preview";
 
       const SYSTEM_PROMPT = `
@@ -1619,16 +1638,25 @@ export default function App() {
               className="fixed right-0 top-0 bottom-0 w-full max-w-md bg-white z-50 shadow-2xl flex flex-col border-l border-black/5"
             >
               <div className="p-8 pb-4 flex items-center justify-between">
-                <div>
+                <div className="flex-1">
                    <h2 className="text-[10px] font-black uppercase tracking-[0.3em] text-yellow-dark mb-1">Audit Log</h2>
                   <p className="text-3xl font-serif italic text-black/80">Transactions</p>
                 </div>
-                <button onClick={() => {
-                  setShowHistory(false);
-                  setHistorySearch("");
-                }} className="w-12 h-12 bg-black/[0.03] rounded-full flex items-center justify-center text-black hover:bg-black/10 transition-all">
-                  <X className="w-6 h-6" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => setShowStatement(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl font-black uppercase tracking-widest text-[9px] hover:bg-black/80 transition-all shadow-lg"
+                  >
+                    <Download className="w-3 h-3" />
+                    Statement
+                  </button>
+                  <button onClick={() => {
+                    setShowHistory(false);
+                    setHistorySearch("");
+                  }} className="w-12 h-12 bg-black/[0.03] rounded-full flex items-center justify-center text-black hover:bg-black/10 transition-all">
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
               </div>
 
               <div className="px-8 pb-6">
@@ -1825,6 +1853,55 @@ export default function App() {
                 >
                   Confirm & Go Back
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Statement Modal */}
+      <AnimatePresence>
+        {showStatement && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] overflow-y-auto bg-black/60 backdrop-blur-xl flex items-start justify-center p-4 md:p-12 font-sans"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 40 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              className="bg-white w-full max-w-5xl rounded-[3rem] shadow-2xl overflow-hidden flex flex-col min-h-[90vh]"
+            >
+              <div className="p-8 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-10">
+                <div>
+                  <h3 className="text-2xl font-serif italic text-black/80">Statement of Account</h3>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Preview Mode</p>
+                </div>
+                <div className="flex items-center gap-4">
+                  <button 
+                    onClick={() => handlePrintStatement()}
+                    className="flex items-center gap-2 px-8 py-4 bg-yellow text-black rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-yellow-dark transition-all shadow-xl shadow-yellow/20"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download PDF
+                  </button>
+                  <button 
+                    onClick={() => setShowStatement(false)}
+                    className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-slate-400 hover:text-black hover:bg-slate-200 transition-all"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto bg-slate-50 p-4 md:p-8">
+                <div className="shadow-2xl shadow-black/5 bg-white">
+                   <Statement 
+                    ref={statementRef}
+                    transactions={transactions}
+                    userData={userData}
+                   />
+                </div>
               </div>
             </motion.div>
           </motion.div>
