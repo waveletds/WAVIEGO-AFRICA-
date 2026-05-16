@@ -1,0 +1,20 @@
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#002B5B" />
+      <stop offset="100%" stop-color="#001C3D" />
+    </linearGradient>
+    <linearGradient id="bubbleGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFD93D" />
+      <stop offset="100%" stop-color="#F9D423" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Bubble Background -->
+  <path d="M100 180C144.183 180 180 144.183 180 100C180 55.8172 144.183 20 100 20C55.8172 20 20 55.8172 20 100C20 119.5 27.5 137.5 40 151L30 180L65 170C75.5 176.5 87.5 180 100 180Z" fill="url(#bubbleGradient)" stroke="#002B5B" stroke-width="4"/>
+  
+  <!-- Wave / Arrow Shape -->
+  <path d="M60 110C60 110 75 80 110 80C145 80 140 110 140 110" stroke="#002B5B" stroke-width="15" stroke-linecap="round"/>
+  <path d="M120 100L150 120L120 140" fill="#002B5B"/>
+  <path d="M70 130C70 130 90 150 120 150C150 150 160 130 160 130" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.4"/>
+</svg>

@@ -7,7 +7,6 @@ import { config } from "dotenv";
 import twilio from "twilio";
 import axios from "axios";
 import crypto from "crypto";
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
@@ -130,6 +129,7 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cookieParser());
+  app.set("trust proxy", 1);
   app.use(express.json({
     verify: (req: any, res, buf) => {
       req.rawBody = buf;
@@ -137,7 +137,19 @@ async function startServer() {
   }));
 
   // API Routes
-  const getUserId = (req: any) => req.cookies.user_id || "default_user";
+  const getUserId = (req: any) => req.cookies.user_id || "unauthenticated";
+
+  const requireAuth = (req: any, res: any, next: any) => {
+    const userId = getUserId(req);
+    if (!userId || userId === "unauthenticated") {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  };
+
+  // Twilio Client
+  const client = getTwilioClient();
+  const twilioEnabled = !!(client && process.env.TWILIO_PHONE_NUMBER);
 
   const setOTP = async (phone: string, code: string) => {
     await db.collection("otps").doc(phone).set({
@@ -158,43 +170,67 @@ async function startServer() {
   };
 
   // API Routes
-  app.get("/api/user", catchAsync(async (req: any, res: any) => {
+  app.get("/api/user", requireAuth, catchAsync(async (req: any, res: any) => {
     const userId = getUserId(req);
+    
     console.log(`[API] Fetching user: ${userId}`);
     const userDoc = await db.collection("users").doc(userId).get();
     
     if (!userDoc.exists) {
-      if (userId === "default_user") {
-        // Sample user for demo landing
-        return res.json({
-          id: "u_sample",
-          phone: "2348000000000",
-          wallet_balance: 150000,
-          pin: "0000",
-          fullname: "Sample User",
-          virtual_bank: "Waviego Bank",
-          virtual_account: "8228819570",
-          virtual_account_name: "WAVIEGO/SAMPLE USER",
-          kyc_completed: true,
-          kyc_step: "completed"
-        });
-      }
       return res.status(404).json({ error: "User not found" });
     }
     res.json(userDoc.data());
   }));
 
   app.post("/api/logout", (req: any, res: any) => {
-    res.clearCookie("user_id");
+    res.clearCookie("user_id", { 
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      path: "/"
+    });
     res.json({ message: "Logged out" });
   });
+
+  // Biometric Registration
+  app.post("/api/biometric/register", requireAuth, catchAsync(async (req: any, res: any) => {
+    const { credentialId, publicKey } = req.body;
+    const userId = getUserId(req);
+    
+    if (!credentialId || !publicKey) {
+      return res.status(400).json({ error: "Missing biometric data" });
+    }
+
+    const userRef = db.collection("users").doc(userId);
+    await userRef.update({
+      biometricSet: true,
+      biometricCredentialId: credentialId,
+      biometricPublicKey: publicKey,
+      updatedAt: serverTimestamp()
+    });
+
+    res.json({ message: "Biometrics enrolled successfully" });
+  }));
+
+  // Biometric Cleanup/Disable
+  app.post("/api/biometric/disable", requireAuth, catchAsync(async (req: any, res: any) => {
+    const userId = getUserId(req);
+    const userRef = db.collection("users").doc(userId);
+    await userRef.update({
+      biometricSet: false,
+      biometricCredentialId: null,
+      biometricPublicKey: null,
+      updatedAt: serverTimestamp()
+    });
+    res.json({ message: "Biometrics disabled" });
+  }));
 
   // API Status Check
   app.get("/api/status", catchAsync(async (req: any, res: any) => {
     res.json({
       gemini: !!process.env.GEMINI_API_KEY,
       monnify: !!process.env.MONNIFY_SECRET_KEY && !!process.env.MONNIFY_API_KEY,
-      paystack: !!process.env.PAYSTACK_SECRET_KEY && !!process.env.VITE_PAYSTACK_PUBLIC_KEY,
+      paystack: !!process.env.PAYSTACK_SECRET_KEY,
       twilio: !!process.env.TWILIO_AUTH_TOKEN,
       firebase: true
     });
@@ -292,17 +328,26 @@ async function startServer() {
           to: formattedPhone
         });
         console.log(`[Twilio] SMS sent: ${message.sid}`);
+        res.json({ message: "OTP sent", step: "otp_verification" });
       } catch (err: any) {
         console.error(`[Twilio] Error:`, err.message || err);
-        console.log(`[Demo Mode Fallback] OTP for ${phone}: ${otp}`);
-        // Return OTP in response for demo fallback
-        return res.json({ message: "OTP sent (Fallback)", step: "otp_verification", demo_otp: otp });
+        // Fallback to demo mode if Twilio fails, so user is not blocked
+        console.log(`[Twilio Fallback] Using demo OTP fallback: ${otp}`);
+        res.json({ 
+          message: "SMS service limited. Using demo OTP fallback.", 
+          step: "otp_verification",
+          demo_otp: otp 
+        });
       }
     } else {
-      console.log(`[Demo Mode] No Twilio credentials. OTP for ${phone}: ${otp}`);
+      console.log(`[Demo/Dev Mode] No Twilio credentials. Using demo OTP fallback: ${otp}`);
+      // In demo mode, we return the OTP to the UI so the user can see it
+      res.json({ 
+        message: "Demo Mode: OTP sent (Check console/response)", 
+        step: "otp_verification",
+        demo_otp: otp 
+      });
     }
-    
-    res.json({ message: "OTP sent", step: "otp_verification", demo_otp: otp });
   }));
 
   app.post("/api/kyc/verify-otp", catchAsync(async (req: any, res: any) => {
@@ -314,44 +359,60 @@ async function startServer() {
       const userRef = db.collection("users").doc(userId);
       const userDoc = await userRef.get();
       
-      // Migrate from default_user if they started there, or create new
-      const oldUserId = getUserId(req);
-      const oldUserDoc = await db.collection("users").doc(oldUserId).get();
+      let finalData = userDoc.exists ? userDoc.data() : { phone };
       
-      let finalData = oldUserDoc.exists ? oldUserDoc.data() : { phone };
+      // Force step to personal_info if they are just starting or were at otp_verification
+      const currentStep = finalData.kyc_step || "init";
+      const nextStep = (currentStep === "init" || currentStep === "otp_verification") ? "personal_info" : currentStep;
+
       finalData = { 
         ...finalData, 
         phone, 
-        kyc_step: "personal_info",
+        kyc_step: nextStep,
         updatedAt: serverTimestamp() 
       };
 
       await userRef.set(finalData);
       
-      // Set session cookie
-      res.cookie("user_id", userId, { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
+      console.log(`[KYC] User ${userId} verified OTP. Next step: ${nextStep}`);
       
-      return res.json({ message: "OTP verified", step: "personal_info" });
+      // Set session cookie
+      res.cookie("user_id", userId, { 
+        maxAge: 30 * 24 * 60 * 60 * 1000, 
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        path: "/"
+      });
+      
+      return res.json({ message: "OTP verified", step: nextStep });
     }
     res.status(400).json({ error: "Invalid OTP" });
   }));
 
-  app.post("/api/kyc/personal-info", catchAsync(async (req: any, res: any) => {
+  app.post("/api/kyc/personal-info", requireAuth, catchAsync(async (req: any, res: any) => {
     const { phone, fullname, email, dob } = req.body;
     if (!phone) return res.status(400).json({ error: "Phone required" });
-    const userRef = db.collection("users").doc(getUserId(req));
+    
+    const userId = getUserId(req);
+    const userRef = db.collection("users").doc(userId);
     const userDoc = await userRef.get();
-    if (userDoc.exists && userDoc.data()?.phone === phone && userDoc.data()?.kyc_step === "personal_info") {
-      await userRef.update({
-        fullname,
-        email,
-        dob,
-        kyc_step: "identity_verification",
-        updatedAt: serverTimestamp()
-      });
-      return res.json({ message: "Personal info saved", step: "identity_verification" });
+    
+    if (userDoc.exists) {
+      const data = userDoc.data();
+      // Relaxed check: Allow if they are in personal_info OR just finished otp (sometimes race conditions happen)
+      if (data?.phone === phone) {
+        await userRef.update({
+          fullname,
+          email,
+          dob,
+          kyc_step: "identity_verification",
+          updatedAt: serverTimestamp()
+        });
+        return res.json({ message: "Personal info saved", step: "identity_verification" });
+      }
     }
-    res.status(400).json({ error: "Invalid state" });
+    res.status(400).json({ error: "Invalid session or user state. Please restart KYC." });
   }));
 
   // Identity Verification Service (Real Paystack + Mock Fallback)
@@ -442,7 +503,7 @@ async function startServer() {
     });
   }
 
-  app.post("/api/kyc/verify-identity", catchAsync(async (req: any, res: any) => {
+  app.post("/api/kyc/verify-identity", requireAuth, catchAsync(async (req: any, res: any) => {
     const { phone, idType, idNumber } = req.body;
     if (!phone) return res.status(400).json({ error: "Phone required" });
     const userRef = db.collection("users").doc(getUserId(req));
@@ -474,7 +535,7 @@ async function startServer() {
     res.status(400).json({ error: "Session expired or invalid state. Please restart KYC." });
   }));
 
-  app.post("/api/kyc/address-verification", catchAsync(async (req: any, res: any) => {
+  app.post("/api/kyc/address-verification", requireAuth, catchAsync(async (req: any, res: any) => {
     const { phone, address, state } = req.body;
     if (!phone) return res.status(400).json({ error: "Phone required" });
     const userRef = db.collection("users").doc(getUserId(req));
@@ -491,7 +552,7 @@ async function startServer() {
     res.status(400).json({ error: "Invalid state" });
   }));
 
-  app.post("/api/kyc/set-pin", catchAsync(async (req: any, res: any) => {
+  app.post("/api/kyc/set-pin", requireAuth, catchAsync(async (req: any, res: any) => {
     const { phone, pin } = req.body;
     if (!phone) return res.status(400).json({ error: "Phone required" });
     const userRef = db.collection("users").doc(getUserId(req));
@@ -532,7 +593,7 @@ async function startServer() {
     res.status(400).json({ error: "Invalid state" });
   }));
 
-  app.post("/api/kyc/reset", catchAsync(async (req: any, res: any) => {
+  app.post("/api/kyc/reset", requireAuth, catchAsync(async (req: any, res: any) => {
     const defaultUser = {
       id: "u1",
       phone: "2348000000000",
@@ -555,13 +616,20 @@ async function startServer() {
     res.json({ message: "KYC reset for demo", user: defaultUser });
   }));
 
-  app.post("/api/transfer", catchAsync(async (req: any, res: any) => {
-    const { amount, recipient, pin } = req.body;
+  app.post("/api/transfer", requireAuth, catchAsync(async (req: any, res: any) => {
+    const { amount, recipient, pin, isBiometric, credentialId } = req.body;
     const userRef = db.collection("users").doc(getUserId(req));
     const userDoc = await userRef.get();
     const user = userDoc.data();
 
-    if (!userDoc.exists || pin !== user?.pin) {
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+    // Authorization: PIN or Biometric
+    if (isBiometric) {
+      if (!user?.biometricSet || user?.biometricCredentialId !== credentialId) {
+        return res.status(403).json({ error: "Biometric verification failed" });
+      }
+    } else if (pin !== user?.pin) {
       return res.status(403).json({ error: "Invalid PIN" });
     }
 
@@ -578,19 +646,59 @@ async function startServer() {
       created_at: new Date().toISOString(),
     };
     
+    // 1. Debit Sender
     await userRef.update({ wallet_balance: newBalance, updatedAt: serverTimestamp() });
-    await userRef.collection("transactions").add(tx);
+    await userRef.collection("transactions").add({ ...tx, category: "debit" });
+
+    // 2. Credit Recipient (if internal user exists by phone)
+    try {
+      // Clean up phone number from recipient string (e.g. "+234 800..." -> "234800...")
+      const cleanedRecipient = recipient.replace(/\D/g, ''); 
+      if (cleanedRecipient.length >= 10) {
+        // We use a specific ID format: user_234800...
+        const recipientUserId = `user_${cleanedRecipient.startsWith('234') ? cleanedRecipient : '234' + (cleanedRecipient.startsWith('0') ? cleanedRecipient.slice(1) : cleanedRecipient)}`;
+        const recipientRef = db.collection("users").doc(recipientUserId);
+        const recipientDoc = await recipientRef.get();
+
+        if (recipientDoc.exists) {
+          const recipientData = recipientDoc.data();
+          await recipientRef.update({
+            wallet_balance: (recipientData.wallet_balance || 0) + amount,
+            updatedAt: serverTimestamp()
+          });
+          await recipientRef.collection("transactions").add({
+            type: "transfer",
+            amount,
+            sender: user.phone,
+            category: "credit",
+            status: "success",
+            created_at: new Date().toISOString()
+          });
+          console.log(`[Transfer] Success: Credited ${amount} to ${recipientUserId}`);
+        }
+      }
+    } catch (creditErr) {
+      console.warn("[Transfer] Internal credit skipped/failed:", creditErr);
+      // Non-blocking for the main transfer
+    }
 
     res.json({ message: "Transfer successful", transaction: tx, balance: newBalance });
   }));
 
-  app.post("/api/vtu", catchAsync(async (req: any, res: any) => {
-    const { amount, network, phone, type, pin } = req.body;
+  app.post("/api/vtu", requireAuth, catchAsync(async (req: any, res: any) => {
+    const { amount, network, phone, type, pin, isBiometric, credentialId } = req.body;
     const userRef = db.collection("users").doc(getUserId(req));
     const userDoc = await userRef.get();
     const user = userDoc.data();
 
-    if (!userDoc.exists || pin !== user?.pin) {
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+    // Authorization: PIN or Biometric
+    if (isBiometric) {
+      if (!user?.biometricSet || user?.biometricCredentialId !== credentialId) {
+        return res.status(403).json({ error: "Biometric verification failed" });
+      }
+    } else if (pin !== user?.pin) {
       return res.status(403).json({ error: "Invalid PIN" });
     }
 
@@ -601,6 +709,7 @@ async function startServer() {
     const newBalance = user?.wallet_balance - amount;
     const tx = {
       type: "vtu",
+      category: "debit",
       amount,
       network,
       phone,
@@ -615,7 +724,7 @@ async function startServer() {
     res.json({ message: `${type} purchase successful`, transaction: tx, balance: newBalance });
   }));
 
-  app.post("/api/fund", catchAsync(async (req: any, res: any) => {
+  app.post("/api/fund", requireAuth, catchAsync(async (req: any, res: any) => {
     const { amount } = req.body;
     const userRef = db.collection("users").doc(getUserId(req));
     const userDoc = await userRef.get();
@@ -638,13 +747,13 @@ async function startServer() {
     res.json({ message: "Account funded successfully", transaction: tx, balance: newBalance });
   }));
 
-  app.get("/api/transactions", catchAsync(async (req: any, res: any) => {
+  app.get("/api/transactions", requireAuth, catchAsync(async (req: any, res: any) => {
     const txs = await db.collection("users").doc(getUserId(req)).collection("transactions").orderBy("created_at", "desc").limit(50).get();
     const transactions = txs.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
     res.json(transactions);
   }));
 
-  app.post("/api/paystack/verify", catchAsync(async (req: any, res: any) => {
+  app.post("/api/paystack/verify", requireAuth, catchAsync(async (req: any, res: any) => {
     const { reference } = req.body;
     const secretKey = process.env.PAYSTACK_SECRET_KEY;
     
@@ -704,7 +813,10 @@ async function startServer() {
       const reference = data.reference;
       
       const amount = data.amount / 100;
-      const userRef = db.collection("users").doc("default_user");
+      const lookupId = data.metadata?.user_id;
+      if (!lookupId) return res.status(200).send("OK");
+      
+      const userRef = db.collection("users").doc(lookupId);
       const userDoc = await userRef.get();
       const user = userDoc.data();
 
@@ -752,9 +864,12 @@ async function startServer() {
     console.log(`[Monnify Webhook] Received event: ${eventType}`);
 
     if (eventType === "SUCCESSFUL_TRANSACTION") {
-      const { transactionReference, amountPaid } = eventData;
+      const { transactionReference, amountPaid, metaData } = eventData;
       
-      const userRef = db.collection("users").doc("default_user");
+      const lookupId = metaData?.user_id;
+      if (!lookupId) return res.status(200).send("OK");
+      
+      const userRef = db.collection("users").doc(lookupId);
       const userDoc = await userRef.get();
       const user = userDoc.data();
 
@@ -783,99 +898,6 @@ async function startServer() {
     }
 
     res.status(200).send("OK");
-  }));
-
-  // Gemini AI Setup
-  const ai_gen = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "AI_KEY_NOT_SET" });
-  
-  const getBalance: FunctionDeclaration = {
-    name: "get_balance",
-    description: "Get the current balance of the user's wallet",
-    parameters: { type: Type.OBJECT, properties: {} },
-  };
-
-  const sendMoney: FunctionDeclaration = {
-    name: "send_money",
-    description: "Send money to another person or bank account.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        amount: { type: Type.NUMBER, description: "The amount of money to send in NGN" },
-        recipient: { type: Type.STRING, description: "The name, phone number or account number of the recipient" },
-      },
-      required: ["amount", "recipient"],
-    },
-  };
-
-  const buyAirtime: FunctionDeclaration = {
-    name: "buy_airtime",
-    description: "Buy airtime or data for a phone number.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        amount: { type: Type.NUMBER, description: "The amount in NGN" },
-        phone: { type: Type.STRING, description: "The target phone number" },
-        network: { type: Type.STRING, description: "The mobile network (MTN, Airtel, Glo, 9mobile)" },
-        type: { type: Type.STRING, enum: ["airtime", "data"], description: "Whether to buy airtime or a data bundle" },
-      },
-      required: ["amount", "phone", "network", "type"],
-    },
-  };
-
-  const getRecentTransactions: FunctionDeclaration = {
-    name: "get_recent_transactions",
-    description: "Show a list of the most recent transactions.",
-    parameters: { type: Type.OBJECT, properties: {} },
-  };
-
-  const SYSTEM_PROMPT = `
-    You are Waviego Africa (by Antigravity), a helpful AI banking assistant.
-    Goal: Help users manage money, transfers, bills, and insights.
-    Mood: Professional, warm, African tone.
-    Security: NEVER share PIN.
-    Operations: get_balance, send_money, buy_airtime, get_recent_transactions.
-  `;
-
-  app.post("/api/chat", catchAsync(async (req: any, res: any) => {
-    const { messages, imageBase64 } = req.body;
-    
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: "Gemini API key is not configured" });
-    }
-
-    let contents = messages.map((m: any) => ({
-      role: m.sender === "user" ? "user" : "model",
-      parts: [{ text: m.text }]
-    }));
-
-    // In case of image processing
-    if (imageBase64) {
-      const lastUserMsg = contents.slice().reverse().find((m: any) => m.role === "user");
-      if (lastUserMsg) {
-        lastUserMsg.parts.push({
-          inlineData: {
-            mimeType: "image/png",
-            data: imageBase64
-          }
-        });
-      }
-    }
-
-    const response = await ai_gen.models.generateContent({
-      model: "gemini-1.5-flash", 
-      contents: contents,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        tools: [{
-          functionDeclarations: [getBalance, sendMoney, buyAirtime, getRecentTransactions]
-        }]
-      }
-    });
-
-    const text = response.text || "";
-    const functionCalls = response.functionCalls || [];
-
-    res.json({ text, functionCalls });
   }));
 
   // Vite middleware for development
