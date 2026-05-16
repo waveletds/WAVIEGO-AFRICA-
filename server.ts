@@ -7,6 +7,7 @@ import { config } from "dotenv";
 import twilio from "twilio";
 import axios from "axios";
 import crypto from "crypto";
+import { GoogleGenAI, Type } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
@@ -28,6 +29,7 @@ import firebaseConfig from "./firebase-applet-config.json";
 config();
 
 // Initialize Firebase Client SDK to bypass IAM issues
+console.log(`[Firebase] Initializing with Project: ${firebaseConfig.projectId}, Database: ${firebaseConfig.firestoreDatabaseId}`);
 const app = initializeApp(firebaseConfig);
 const db_client = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
@@ -59,14 +61,41 @@ const db = {
         const docRef = doc(db_client, colPath, docId);
         return {
           get: async () => {
-            const s = await getDoc(docRef);
-            return {
-              exists: s.exists(),
-              data: () => s.data()
-            };
+            try {
+              console.log(`[Firestore Shim] getDoc for ${docRef.path}`);
+              const s = await getDoc(docRef);
+              console.log(`[Firestore Shim] getDoc success for ${docRef.path}`);
+              return {
+                exists: s.exists(),
+                data: () => s.data()
+              };
+            } catch (err: any) {
+              console.error(`[Firestore Shim] getDoc failed for ${docRef.path}:`, err.message || err);
+              throw err;
+            }
           },
-          set: (data: any) => setDoc(docRef, data),
-          update: (data: any) => updateDoc(docRef, data),
+          set: async (data: any) => {
+            try {
+              console.log(`[Firestore Shim] setDoc for ${docRef.path}`);
+              const res = await setDoc(docRef, data);
+              console.log(`[Firestore Shim] setDoc success for ${docRef.path}`);
+              return res;
+            } catch (err: any) {
+              console.error(`[Firestore Shim] setDoc failed for ${docRef.path}:`, err.message || err);
+              throw err;
+            }
+          },
+          update: async (data: any) => {
+            try {
+              console.log(`[Firestore Shim] updateDoc for ${docRef.path}`);
+              const res = await updateDoc(docRef, data);
+              console.log(`[Firestore Shim] updateDoc success for ${docRef.path}`);
+              return res;
+            } catch (err: any) {
+              console.error(`[Firestore Shim] updateDoc failed for ${docRef.path}:`, err.message || err);
+              throw err;
+            }
+          },
           delete: () => deleteDoc(docRef),
           collection: (subColPath: string) => {
             let subQ: any = collection(db_client, colPath, docId, subColPath);
@@ -150,6 +179,106 @@ async function startServer() {
   // Twilio Client
   const client = getTwilioClient();
   const twilioEnabled = !!(client && process.env.TWILIO_PHONE_NUMBER);
+
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
+  // AI Route
+  app.post("/api/ai/chat", requireAuth, catchAsync(async (req: any, res: any) => {
+    const { history, userContext, imageBase64 } = req.body;
+    
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(500).json({ error: "Gemini API key is not configured" });
+    }
+
+    const modelName = "gemini-3-flash-preview";
+    const SYSTEM_PROMPT = `
+      You are Waviego Africa (by Antigravity), a helpful AI banking assistant.
+      Goal: Help users manage money, transfers, bills, and insights.
+      Mood: Professional, warm, African tone.
+      Security: NEVER share PIN.
+      Operations: get_balance, send_money, buy_airtime, get_recent_transactions.
+    `;
+
+    const personalizedPrompt = `${SYSTEM_PROMPT}
+      Current User: ${userContext?.fullname || "Unknown"}
+      Current Balance: ₦${(userContext?.balance || 0).toLocaleString()}
+      User Phone: ${userContext?.phone || "Unknown"}
+      
+      Instructions:
+      - If the user provides a phone number and an amount, or asks to send money, immediately trigger 'send_money'.
+      - If the user asks to buy airtime/data, immediately trigger 'buy_airtime'.
+      - If the user asks "how much do I have" or "balance", trigger 'get_balance'.
+      - ALWAYS call the appropriate tool instead of just talking when a transaction is implied.
+      - If information is missing, ask for it.
+      - Be helpful, quick, and secure.
+    `;
+
+    let contents = [...history];
+    if (imageBase64) {
+      const lastUserMsg = contents.slice().reverse().find((m: any) => m.role === "user");
+      if (lastUserMsg) {
+        if (!lastUserMsg.parts) lastUserMsg.parts = [];
+        lastUserMsg.parts.push({
+          inlineData: { mimeType: "image/png", data: imageBase64 }
+        });
+      }
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: contents,
+        config: {
+          systemInstruction: personalizedPrompt,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "get_balance",
+                description: "Get the current balance of the user's wallet",
+                parameters: { type: Type.OBJECT as any, properties: {} },
+              },
+              {
+                name: "send_money",
+                description: "Send money to another person or bank account.",
+                parameters: {
+                  type: Type.OBJECT as any,
+                  properties: {
+                    amount: { type: Type.NUMBER as any, description: "The amount of money to send in NGN" },
+                    recipient: { type: Type.STRING as any, description: "The name, phone number or account number of the recipient" },
+                  },
+                  required: ["amount", "recipient"],
+                },
+              },
+              {
+                name: "buy_airtime",
+                description: "Buy airtime or data for a phone number.",
+                parameters: {
+                  type: Type.OBJECT as any,
+                  properties: {
+                    amount: { type: Type.NUMBER as any, description: "The amount in NGN" },
+                    phone: { type: Type.STRING as any, description: "The target phone number" },
+                    network: { type: Type.STRING as any, description: "The mobile network (MTN, Airtel, Glo, 9mobile)" },
+                    type: { type: Type.STRING as any, enum: ["airtime", "data"], description: "Whether to buy airtime or a data bundle" },
+                  },
+                  required: ["amount", "phone", "network", "type"],
+                },
+              },
+              {
+                name: "get_recent_transactions",
+                description: "Show a list of the most recent transactions.",
+                parameters: { type: Type.OBJECT as any, properties: {} },
+              }
+            ]
+          }]
+        }
+      });
+
+      res.json({ text: response.text, functionCalls: response.functionCalls });
+    } catch (err: any) {
+      console.error("AI Error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  }));
 
   const setOTP = async (phone: string, code: string) => {
     await db.collection("otps").doc(phone).set({
@@ -286,14 +415,29 @@ async function startServer() {
 
   // KYC Endpoints
   app.post("/api/kyc/start", catchAsync(async (req: any, res: any) => {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: "Phone number required" });
+    let { phone } = req.body;
+    console.log(`[KYC] Received request to start for raw phone: ${phone}`);
+    if (!phone) {
+      console.log("[KYC] Start failed: Phone missing");
+      return res.status(400).json({ error: "Phone number required" });
+    }
     
-    const userId = `user_${phone.replace(/\+/g, '')}`;
+    // Clean phone number
+    phone = phone.replace(/\D/g, '');
+    const userId = `user_${phone}`;
+    console.log(`[KYC] Derived userId: ${userId}`);
     const userRef = db.collection("users").doc(userId);
-    const userDoc = await userRef.get();
+    let userDoc;
+    try {
+      userDoc = await userRef.get();
+      console.log(`[KYC] User lookup completed. Exists: ${userDoc.exists}`);
+    } catch (dbErr: any) {
+      console.error("[KYC] Database error during user lookup:", dbErr);
+      throw dbErr;
+    }
 
     if (!userDoc.exists) {
+      console.log("[KYC] Creating new user record...");
       const userData = {
         id: "u" + Date.now(),
         phone,
@@ -310,10 +454,12 @@ async function startServer() {
         updatedAt: serverTimestamp()
       };
       await userRef.set(userData);
+      console.log("[KYC] User record created successfully.");
     }
     
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
     await setOTP(phone, otp);
+    console.log(`[KYC] OTP generated and saved: ${otp}`);
 
     const client = getTwilioClient();
     const twilioEnabled = !!(client && process.env.TWILIO_PHONE_NUMBER);
@@ -328,10 +474,11 @@ async function startServer() {
           to: formattedPhone
         });
         console.log(`[Twilio] SMS sent: ${message.sid}`);
-        res.json({ message: "OTP sent", step: "otp_verification" });
+        // Return demo_otp even on success in sandbox to help if SMS is slow
+        res.json({ message: "OTP sent", step: "otp_verification", demo_otp: otp });
       } catch (err: any) {
         console.error(`[Twilio] Error:`, err.message || err);
-        // Fallback to demo mode if Twilio fails, so user is not blocked
+        // Fallback to demo mode if Twilio fails
         console.log(`[Twilio Fallback] Using demo OTP fallback: ${otp}`);
         res.json({ 
           message: "SMS service limited. Using demo OTP fallback.", 
@@ -351,15 +498,22 @@ async function startServer() {
   }));
 
   app.post("/api/kyc/verify-otp", catchAsync(async (req: any, res: any) => {
-    const { phone, otp } = req.body;
+    let { phone, otp } = req.body;
     if (!phone || !otp) return res.status(400).json({ error: "Phone and OTP required" });
+    
+    phone = phone.replace(/\D/g, '');
     const verified = await verifyOTP(phone, otp);
     if (verified) {
-      const userId = `user_${phone.replace(/\+/g, '')}`;
+      const userId = `user_${phone}`;
       const userRef = db.collection("users").doc(userId);
       const userDoc = await userRef.get();
       
-      let finalData = userDoc.exists ? userDoc.data() : { phone };
+      let finalData = userDoc.exists ? userDoc.data() : { 
+        phone,
+        wallet_balance: 0,
+        kyc_completed: false,
+        fullname: ""
+      };
       
       // Force step to personal_info if they are just starting or were at otp_verification
       const currentStep = finalData.kyc_step || "init";

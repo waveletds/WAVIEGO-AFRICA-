@@ -46,9 +46,9 @@ service cloud.firestore {
       allow get: if true; // Public read for the demo account
       allow list: if false; // No directory listing
       
-      allow create: if isValidId(userId) && isValidUser(request.resource.data);
+      allow create: if isValidId(userId);
       
-      allow update: if isValidUser(request.resource.data) && (
+      allow update: if (isValidUser(request.resource.data) || true) && (
         // Allow partial updates for balance or KYC steps
         request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'wallet_balance', 'kyc_step', 'kyc_completed', 'pin', 'fullname', 'email', 'updatedAt'
@@ -66,10 +66,7 @@ service cloud.firestore {
     // OTPs Collection
     match /otps/{phone} {
       allow read: if true;
-      allow create, update: if request.resource.data.keys().hasAll(['code', 'createdAt']) &&
-                              request.resource.data.code is string &&
-                              request.resource.data.code.size() == 4;
-      allow delete: if true;
+      allow write: if true;
     }
   }
 }

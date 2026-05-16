@@ -34,7 +34,6 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toPng } from "html-to-image";
-import { getGeminiResponse } from "./services/geminiService";
 import { Receipt } from "./components/Receipt";
 import { doc, getDocFromServer } from 'firebase/firestore';
 import { db } from './lib/firebase';
@@ -197,7 +196,7 @@ export default function App() {
   const fetchUserData = async () => {
     console.log("[App] Fetching user data...");
     try {
-      const res = await fetch("/api/user");
+      const res = await fetch("/api/user", { credentials: 'include' });
       if (res.status === 401 || res.status === 404) {
         console.log("[App] User not found or unauthorized");
         setUserData(null);
@@ -250,17 +249,27 @@ export default function App() {
     }
   };
 
+  const cleanPhone = (p: string) => p.replace(/\D/g, '');
+
   const startKyc = async () => {
+    const cleanedPhone = cleanPhone(kycPhone);
+    if (!cleanedPhone) {
+      setKycError("Please enter a valid phone number");
+      return;
+    }
     setKycLoading(true);
     setKycError("");
     try {
+      console.log("[KYC] Starting onboarding for:", cleanedPhone);
       const res = await fetch("/api/kyc/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone })
+        body: JSON.stringify({ phone: cleanedPhone }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
+        console.log("[KYC] Start successful, next step:", data.step);
         setKycStep(data.step);
         if (data.demo_otp) {
           setKycDemoOtp(data.demo_otp);
@@ -268,24 +277,28 @@ export default function App() {
           setKycDemoOtp(null);
         }
       } else {
-        setKycError(data.error);
+        console.error("[KYC] Start failed:", data.error || "Unknown error");
+        setKycError(data.error || "Failed to start KYC. Please try again.");
       }
-    } catch (err) {
-      setKycError("Failed to start KYC");
+    } catch (err: any) {
+      console.error("[KYC] Fetch error:", err);
+      setKycError(`Connection error: ${err.message || "Failed to contact server"}`);
     } finally {
       setKycLoading(false);
     }
   };
 
   const verifyOtp = async () => {
-    console.log("[KYC] Verifying OTP...");
+    const cleanedPhone = cleanPhone(kycPhone);
+    console.log("[KYC] Verifying OTP for:", cleanedPhone);
     setKycLoading(true);
     setKycError("");
     try {
       const res = await fetch("/api/kyc/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone, otp: kycOtp })
+        body: JSON.stringify({ phone: cleanedPhone, otp: kycOtp }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
@@ -312,7 +325,8 @@ export default function App() {
       const res = await fetch("/api/kyc/personal-info", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone, fullname: kycFullname, email: kycEmail, dob: kycDob })
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), fullname: kycFullname, email: kycEmail, dob: kycDob }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
@@ -339,7 +353,8 @@ export default function App() {
       const res = await fetch("/api/kyc/verify-identity", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone, idType: kycIdType, idNumber: kycIdNumber })
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), idType: kycIdType, idNumber: kycIdNumber }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
@@ -366,7 +381,8 @@ export default function App() {
       const res = await fetch("/api/kyc/address-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone, address: kycAddress, state: kycState })
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), address: kycAddress, state: kycState }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
@@ -389,7 +405,8 @@ export default function App() {
       const res = await fetch("/api/kyc/set-pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: kycPhone, pin: kycPin })
+        body: JSON.stringify({ phone: cleanPhone(kycPhone), pin: kycPin }),
+        credentials: 'include'
       });
       const data = await res.json();
       if (res.ok) {
@@ -575,18 +592,30 @@ export default function App() {
     setError("");
 
     try {
-      const imageBase64 = currentImage ? currentImage.split(',')[1] : undefined;
-      const history = messages.map(m => ({
-        role: m.sender === "user" ? "user" : "model",
-        parts: [{ text: m.text }]
-      })).concat([{ role: "user", parts: [{ text: currentInput || "Analyze this image for banking details." }] }]);
+      console.log("[KYC] Requesting AI response for:", input || "image");
+      const res = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          history: messages.map(m => ({
+            role: m.sender === "user" ? "user" : "model",
+            parts: [{ text: m.text }]
+          })).concat([{ role: "user", parts: [{ text: currentInput || "Analyze this image for banking details." }] }]),
+          userContext: {
+            fullname: userData?.fullname,
+            balance: userData?.wallet_balance,
+            phone: userData?.phone
+          },
+          imageBase64: currentImage ? currentImage.split(',')[1] : undefined
+        })
+      });
 
-      const response = await getGeminiResponse(history, {
-        fullname: userData?.fullname,
-        balance: userData?.wallet_balance,
-        phone: userData?.phone
-      }, imageBase64);
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || "AI Request failed");
+      }
 
+      const response = await res.json();
       const aiText = response.text || "I'm processing that for you...";
       const functionCalls = response.functionCalls;
 
