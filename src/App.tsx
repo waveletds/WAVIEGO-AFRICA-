@@ -127,6 +127,12 @@ export default function App() {
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
+    // Audit backend health
+    safeFetch("/api/health", { throwOnError: false })
+      .then(res => res.ok ? res.json() : Promise.reject(res.status))
+      .then(h => console.log("[App] Backend healthy:", h))
+      .catch(e => console.warn("[App] Backend health issues:", e));
+
     fetchUserData();
     fetchApiStatus();
     setBiometricSupported(isBiometricSupported());
@@ -191,7 +197,10 @@ export default function App() {
   const safeFetch = async (path: string, options: RequestInit & { throwOnError?: boolean } = {}) => {
     const { throwOnError = true, ...fetchOptions } = options;
     try {
-      console.log(`[Fetch] Requesting: ${path}`, fetchOptions.method || 'GET');
+      console.log(`[Fetch] Requesting: ${path}`, fetchOptions.method || 'GET', {
+        href: window.location.href,
+        origin: window.location.origin
+      });
       
       const config: RequestInit = {
         ...fetchOptions,

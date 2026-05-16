@@ -23,14 +23,14 @@ import {
   deleteDoc, 
   serverTimestamp
 } from "firebase/firestore";
-import firebaseConfig from "./firebase-applet-config.json";
+import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
 
 config();
 
 // Initialize Firebase Client SDK to bypass IAM issues
 console.log(`[Firebase] Initializing with Project: ${firebaseConfig.projectId}, Database: ${firebaseConfig.firestoreDatabaseId}`);
-const app = initializeApp(firebaseConfig);
-const db_client = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const firebaseApp = initializeApp(firebaseConfig);
+const db_client = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 // Shim to make client SDK look like Admin SDK for easier migration
 const db = {
@@ -167,9 +167,18 @@ async function startServer() {
   // Request logger
   app.use((req, res, next) => {
     if (req.url.startsWith('/api')) {
-      console.log(`[API Request] ${req.method} ${req.url}`);
+      console.log(`[API Request] ${req.method} ${req.url} - ${new Date().toISOString()}`);
     }
     next();
+  });
+
+  // Health check
+  app.get("/api/health", (req, res) => {
+    res.json({ 
+      status: "ok", 
+      time: new Date().toISOString(),
+      env: process.env.NODE_ENV || 'development'
+    });
   });
 
   // API Routes
