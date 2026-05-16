@@ -126,16 +126,6 @@ export default function App() {
     fetchApiStatus();
     setBiometricSupported(isBiometricSupported());
 
-    const testConnection = async () => {
-      try {
-        // await getDocFromServer(doc(db, 'test', 'connection'));
-        // console.log("Database Online");
-      } catch (error) {
-        // Suppress benign connection logs
-      }
-    };
-    testConnection();
-    
     // Initialize Web Speech API
     if (typeof window !== 'undefined') {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -193,10 +183,25 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
+  const safeFetch = async (path: string, options: RequestInit = {}) => {
+    try {
+      const url = new URL(path, window.location.origin).href;
+      console.log(`[Fetch] Requesting: ${url}`, options.method || 'GET');
+      const res = await fetch(url, options);
+      return res;
+    } catch (err: any) {
+      console.error(`[Fetch] Error for ${path}:`, err);
+      // Re-throw with more context
+      const newErr = new Error(err.message || "Fetch failed");
+      (newErr as any).originalError = err;
+      throw newErr;
+    }
+  };
+
   const fetchUserData = async () => {
     console.log("[App] Fetching user data...");
     try {
-      const res = await fetch("/api/user");
+      const res = await safeFetch("/api/user");
       if (res.status === 401 || res.status === 404) {
         console.log("[App] User not found or unauthorized");
         setUserData(null);
@@ -224,7 +229,8 @@ export default function App() {
 
   const logout = async () => {
     try {
-      await fetch("/api/logout", { method: "POST" });
+      const url = new URL("/api/logout", window.location.origin).href;
+      await fetch(url, { method: "POST" });
       setUserData(null);
       setKycStep("init");
       setMessages([{
@@ -241,7 +247,8 @@ export default function App() {
 
   const fetchApiStatus = async () => {
     try {
-      const res = await fetch("/api/status");
+      const url = new URL("/api/status", window.location.origin).href;
+      const res = await fetch(url);
       const data = await res.json();
       setApiStatus(data);
     } catch (err) {
@@ -264,7 +271,7 @@ export default function App() {
     setKycError("");
     try {
       console.log("[KYC] Starting onboarding for:", cleanedPhone);
-      const res = await fetch("/api/kyc/start", {
+      const res = await safeFetch("/api/kyc/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanedPhone })
@@ -297,7 +304,8 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const res = await fetch("/api/kyc/verify-otp", {
+      const url = new URL("/api/kyc/verify-otp", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanedPhone, otp: kycOtp })
@@ -324,7 +332,8 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const res = await fetch("/api/kyc/personal-info", {
+      const url = new URL("/api/kyc/personal-info", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), fullname: kycFullname, email: kycEmail, dob: kycDob })
@@ -351,7 +360,8 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const res = await fetch("/api/kyc/verify-identity", {
+      const url = new URL("/api/kyc/verify-identity", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), idType: kycIdType, idNumber: kycIdNumber })
@@ -378,7 +388,8 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const res = await fetch("/api/kyc/address-verification", {
+      const url = new URL("/api/kyc/address-verification", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), address: kycAddress, state: kycState })
@@ -401,7 +412,8 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const res = await fetch("/api/kyc/set-pin", {
+      const url = new URL("/api/kyc/set-pin", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), pin: kycPin })
@@ -426,7 +438,8 @@ export default function App() {
     setKycError("");
     try {
       const { credentialId, publicKey } = await registerBiometric(userData.fullname);
-      const res = await fetch("/api/biometric/register", {
+      const url = new URL("/api/biometric/register", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credentialId, publicKey })
@@ -462,8 +475,9 @@ export default function App() {
       const credentialId = await authenticateBiometric(userData.biometricCredentialId);
       
       // Execute action with biometric flag
-      const endpoint = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
-      const res = await fetch(endpoint, {
+      const path = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
+      const url = new URL(path, window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...pendingAction, isBiometric: true, credentialId })
@@ -529,7 +543,8 @@ export default function App() {
       callback: async (response: any) => {
         console.log("Paystack Payment Successful:", response);
         try {
-          const verifyRes = await fetch("/api/paystack/verify", {
+          const url = new URL("/api/paystack/verify", window.location.origin).href;
+          const verifyRes = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ reference: response.reference })
@@ -561,7 +576,8 @@ export default function App() {
 
   const fetchTransactions = async () => {
     try {
-      const res = await fetch("/api/transactions");
+      const url = new URL("/api/transactions", window.location.origin).href;
+      const res = await fetch(url);
       const data = await res.json();
       setTransactions(data);
     } catch (err) {
@@ -591,7 +607,8 @@ export default function App() {
 
     try {
       console.log("[KYC] Requesting AI response for:", input || "image");
-      const res = await fetch("/api/ai/chat", {
+      const url = new URL("/api/ai/chat", window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -680,8 +697,9 @@ export default function App() {
     }
 
     try {
-      const endpoint = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
-      const res = await fetch(endpoint, {
+      const path = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
+      const url = new URL(path, window.location.origin).href;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...pendingAction, pin })
