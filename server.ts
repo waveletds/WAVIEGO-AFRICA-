@@ -7,7 +7,6 @@ import { config } from "dotenv";
 import twilio from "twilio";
 import axios from "axios";
 import crypto from "crypto";
-import { GoogleGenAI, Type } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
@@ -180,106 +179,6 @@ async function startServer() {
   const client = getTwilioClient();
   const twilioEnabled = !!(client && process.env.TWILIO_PHONE_NUMBER);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
-  // AI Route
-  app.post("/api/ai/chat", requireAuth, catchAsync(async (req: any, res: any) => {
-    const { history, userContext, imageBase64 } = req.body;
-    
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: "Gemini API key is not configured" });
-    }
-
-    const modelName = "gemini-3-flash-preview";
-    const SYSTEM_PROMPT = `
-      You are Waviego Africa (by Antigravity), a helpful AI banking assistant.
-      Goal: Help users manage money, transfers, bills, and insights.
-      Mood: Professional, warm, African tone.
-      Security: NEVER share PIN.
-      Operations: get_balance, send_money, buy_airtime, get_recent_transactions.
-    `;
-
-    const personalizedPrompt = `${SYSTEM_PROMPT}
-      Current User: ${userContext?.fullname || "Unknown"}
-      Current Balance: ₦${(userContext?.balance || 0).toLocaleString()}
-      User Phone: ${userContext?.phone || "Unknown"}
-      
-      Instructions:
-      - If the user provides a phone number and an amount, or asks to send money, immediately trigger 'send_money'.
-      - If the user asks to buy airtime/data, immediately trigger 'buy_airtime'.
-      - If the user asks "how much do I have" or "balance", trigger 'get_balance'.
-      - ALWAYS call the appropriate tool instead of just talking when a transaction is implied.
-      - If information is missing, ask for it.
-      - Be helpful, quick, and secure.
-    `;
-
-    let contents = [...history];
-    if (imageBase64) {
-      const lastUserMsg = contents.slice().reverse().find((m: any) => m.role === "user");
-      if (lastUserMsg) {
-        if (!lastUserMsg.parts) lastUserMsg.parts = [];
-        lastUserMsg.parts.push({
-          inlineData: { mimeType: "image/png", data: imageBase64 }
-        });
-      }
-    }
-
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: contents,
-        config: {
-          systemInstruction: personalizedPrompt,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: "get_balance",
-                description: "Get the current balance of the user's wallet",
-                parameters: { type: Type.OBJECT as any, properties: {} },
-              },
-              {
-                name: "send_money",
-                description: "Send money to another person or bank account.",
-                parameters: {
-                  type: Type.OBJECT as any,
-                  properties: {
-                    amount: { type: Type.NUMBER as any, description: "The amount of money to send in NGN" },
-                    recipient: { type: Type.STRING as any, description: "The name, phone number or account number of the recipient" },
-                  },
-                  required: ["amount", "recipient"],
-                },
-              },
-              {
-                name: "buy_airtime",
-                description: "Buy airtime or data for a phone number.",
-                parameters: {
-                  type: Type.OBJECT as any,
-                  properties: {
-                    amount: { type: Type.NUMBER as any, description: "The amount in NGN" },
-                    phone: { type: Type.STRING as any, description: "The target phone number" },
-                    network: { type: Type.STRING as any, description: "The mobile network (MTN, Airtel, Glo, 9mobile)" },
-                    type: { type: Type.STRING as any, enum: ["airtime", "data"], description: "Whether to buy airtime or a data bundle" },
-                  },
-                  required: ["amount", "phone", "network", "type"],
-                },
-              },
-              {
-                name: "get_recent_transactions",
-                description: "Show a list of the most recent transactions.",
-                parameters: { type: Type.OBJECT as any, properties: {} },
-              }
-            ]
-          }]
-        }
-      });
-
-      res.json({ text: response.text, functionCalls: response.functionCalls });
-    } catch (err: any) {
-      console.error("AI Error:", err);
-      res.status(500).json({ error: err.message });
-    }
-  }));
-
   const setOTP = async (phone: string, code: string) => {
     await db.collection("otps").doc(phone).set({
       code,
@@ -367,7 +266,7 @@ async function startServer() {
 
   // Monnify Helpers
   const getMonnifyToken = async () => {
-    const apiKey = process.env.VITE_MONNIFY_API_KEY;
+    const apiKey = process.env.MONNIFY_API_KEY || process.env.VITE_MONNIFY_API_KEY;
     const secretKey = process.env.MONNIFY_SECRET_KEY;
     const baseUrl = process.env.MONNIFY_API_BASE_URL || 'https://sandbox.monnify.com';
     if (!apiKey || !secretKey) return null;

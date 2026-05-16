@@ -37,6 +37,7 @@ import { toPng } from "html-to-image";
 import { Receipt } from "./components/Receipt";
 import { doc, getDocFromServer } from 'firebase/firestore';
 import { db } from './lib/firebase';
+import { GoogleGenAI, Type } from "@google/genai";
 import { registerBiometric, authenticateBiometric, isBiometricSupported } from "./lib/biometrics";
 
 interface Message {
@@ -185,16 +186,31 @@ export default function App() {
 
   const safeFetch = async (path: string, options: RequestInit = {}) => {
     try {
-      const url = new URL(path, window.location.origin).href;
+      // Use absolute path constructed manually to avoid URL constructor issues if origin is tricky
+      const origin = window.location.origin;
+      const url = path.startsWith('http') ? path : `${origin}${path}`;
+      
       console.log(`[Fetch] Requesting: ${url}`, options.method || 'GET');
-      const res = await fetch(url, options);
+      
+      // Ensure credentials: 'include' is set for session persistence if needed, 
+      // though same-origin fetch usually includes cookies by default.
+      // But let's be explicit and allow overrides.
+      const fetchOptions: RequestInit = {
+        ...options,
+        credentials: options.credentials || 'same-origin'
+      };
+
+      const res = await fetch(url, fetchOptions);
+      console.log(`[Fetch] Response ${res.status} for ${path}`);
       return res;
     } catch (err: any) {
-      console.error(`[Fetch] Error for ${path}:`, err);
-      // Re-throw with more context
-      const newErr = new Error(err.message || "Fetch failed");
-      (newErr as any).originalError = err;
-      throw newErr;
+      console.error(`[Fetch] Critical error for ${path}:`, err);
+      // Construct a more useful error object
+      const errorMsg = err.message || "Network request failed";
+      const diagnosticErr = new Error(`Connection error: ${errorMsg}`);
+      (diagnosticErr as any).path = path;
+      (diagnosticErr as any).diagnostic = JSON.stringify(err);
+      throw diagnosticErr;
     }
   };
 
@@ -229,8 +245,7 @@ export default function App() {
 
   const logout = async () => {
     try {
-      const url = new URL("/api/logout", window.location.origin).href;
-      await fetch(url, { method: "POST" });
+      await safeFetch("/api/logout", { method: "POST" });
       setUserData(null);
       setKycStep("init");
       setMessages([{
@@ -247,8 +262,7 @@ export default function App() {
 
   const fetchApiStatus = async () => {
     try {
-      const url = new URL("/api/status", window.location.origin).href;
-      const res = await fetch(url);
+      const res = await safeFetch("/api/status");
       const data = await res.json();
       setApiStatus(data);
     } catch (err) {
@@ -291,8 +305,9 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("[KYC] Fetch error:", err);
-      const errorMsg = err.message || JSON.stringify(err);
-      setKycError(`Connection error: ${errorMsg}`);
+      const errorMsg = err.message || "Network request failed";
+      const diagnostic = err.diagnostic ? ` (Info: ${err.diagnostic})` : "";
+      setKycError(`Connection Error: ${errorMsg}${diagnostic}`);
     } finally {
       setKycLoading(false);
     }
@@ -304,8 +319,7 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const url = new URL("/api/kyc/verify-otp", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/kyc/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanedPhone, otp: kycOtp })
@@ -332,8 +346,7 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const url = new URL("/api/kyc/personal-info", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/kyc/personal-info", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), fullname: kycFullname, email: kycEmail, dob: kycDob })
@@ -360,8 +373,7 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const url = new URL("/api/kyc/verify-identity", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/kyc/verify-identity", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), idType: kycIdType, idNumber: kycIdNumber })
@@ -388,8 +400,7 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const url = new URL("/api/kyc/address-verification", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/kyc/address-verification", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), address: kycAddress, state: kycState })
@@ -412,8 +423,7 @@ export default function App() {
     setKycLoading(true);
     setKycError("");
     try {
-      const url = new URL("/api/kyc/set-pin", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/kyc/set-pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: cleanPhone(kycPhone), pin: kycPin })
@@ -438,8 +448,7 @@ export default function App() {
     setKycError("");
     try {
       const { credentialId, publicKey } = await registerBiometric(userData.fullname);
-      const url = new URL("/api/biometric/register", window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch("/api/biometric/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credentialId, publicKey })
@@ -476,8 +485,7 @@ export default function App() {
       
       // Execute action with biometric flag
       const path = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
-      const url = new URL(path, window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...pendingAction, isBiometric: true, credentialId })
@@ -543,8 +551,7 @@ export default function App() {
       callback: async (response: any) => {
         console.log("Paystack Payment Successful:", response);
         try {
-          const url = new URL("/api/paystack/verify", window.location.origin).href;
-          const verifyRes = await fetch(url, {
+          const verifyRes = await safeFetch("/api/paystack/verify", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ reference: response.reference })
@@ -576,8 +583,7 @@ export default function App() {
 
   const fetchTransactions = async () => {
     try {
-      const url = new URL("/api/transactions", window.location.origin).href;
-      const res = await fetch(url);
+      const res = await safeFetch("/api/transactions");
       const data = await res.json();
       setTransactions(data);
     } catch (err) {
@@ -606,31 +612,102 @@ export default function App() {
     setError("");
 
     try {
-      console.log("[KYC] Requesting AI response for:", input || "image");
-      const url = new URL("/api/ai/chat", window.location.origin).href;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          history: messages.map(m => ({
-            role: m.sender === "user" ? "user" : "model",
-            parts: [{ text: m.text }]
-          })).concat([{ role: "user", parts: [{ text: currentInput || "Analyze this image for banking details." }] }]),
-          userContext: {
-            fullname: userData?.fullname,
-            balance: userData?.wallet_balance,
-            phone: userData?.phone
-          },
-          imageBase64: currentImage ? currentImage.split(',')[1] : undefined
-        })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "AI Request failed");
+      console.log("[AI] Initializing Gemini on frontend...");
+      const apiKey = (process as any).env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API key is not configured in the environment.");
       }
 
-      const response = await res.json();
+      const ai = new GoogleGenAI({ apiKey });
+      const modelName = "gemini-3-flash-preview";
+
+      const SYSTEM_PROMPT = `
+        You are Waviego Africa (by Antigravity), a helpful AI banking assistant.
+        Goal: Help users manage money, transfers, bills, and insights.
+        Mood: Professional, warm, African tone.
+        Security: NEVER share PIN.
+        Operations: get_balance, send_money, buy_airtime, get_recent_transactions.
+      `;
+
+      const personalizedPrompt = `${SYSTEM_PROMPT}
+        Current User: ${userData?.fullname || "Unknown"}
+        Current Balance: ₦${(userData?.wallet_balance || 0).toLocaleString()}
+        User Phone: ${userData?.phone || "Unknown"}
+        
+        Instructions:
+        - If the user provides a phone number and an amount, or asks to send money, immediately trigger 'send_money'.
+        - If the user asks to buy airtime/data, immediately trigger 'buy_airtime'.
+        - If the user asks "how much do I have" or "balance", trigger 'get_balance'.
+        - ALWAYS call the appropriate tool instead of just talking when a transaction is implied.
+        - If information is missing, ask for it.
+        - Be helpful, quick, and secure.
+      `;
+
+      const history = messages.map(m => ({
+        role: m.sender === "user" ? "user" : "model",
+        parts: [{ text: m.text }]
+      }));
+
+      const newUserParts: any[] = [{ text: currentInput || "Analyze this image for banking details." }];
+      if (currentImage) {
+        newUserParts.push({
+          inlineData: {
+            mimeType: "image/png",
+            data: currentImage.split(',')[1]
+          }
+        });
+      }
+
+      const contents = [...history, { role: "user", parts: newUserParts }];
+
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: contents,
+        config: {
+          systemInstruction: personalizedPrompt,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "get_balance",
+                description: "Get the current balance of the user's wallet",
+                parameters: { type: Type.OBJECT as any, properties: {} },
+              },
+              {
+                name: "send_money",
+                description: "Send money to another person or bank account.",
+                parameters: {
+                  type: Type.OBJECT as any,
+                  properties: {
+                    amount: { type: Type.NUMBER as any, description: "The amount of money to send in NGN" },
+                    recipient: { type: Type.STRING as any, description: "The name, phone number or account number of the recipient" },
+                  },
+                  required: ["amount", "recipient"],
+                },
+              },
+              {
+                name: "buy_airtime",
+                description: "Buy airtime or data for a phone number.",
+                parameters: {
+                  type: Type.OBJECT as any,
+                  properties: {
+                    amount: { type: Type.NUMBER as any, description: "The amount in NGN" },
+                    phone: { type: Type.STRING as any, description: "The target phone number" },
+                    network: { type: Type.STRING as any, description: "The mobile network (MTN, Airtel, Glo, 9mobile)" },
+                    type: { type: Type.STRING as any, enum: ["airtime", "data"], description: "Whether to buy airtime or a data bundle" },
+                  },
+                  required: ["amount", "phone", "network", "type"],
+                },
+              },
+              {
+                name: "get_recent_transactions",
+                description: "Show a list of the most recent transactions.",
+                parameters: { type: Type.OBJECT as any, properties: {} },
+              }
+            ]
+          }]
+        }
+      });
+
       const aiText = response.text || "I'm processing that for you...";
       const functionCalls = response.functionCalls;
 
@@ -698,8 +775,7 @@ export default function App() {
 
     try {
       const path = pendingAction.actionType === "transfer" ? "/api/transfer" : "/api/vtu";
-      const url = new URL(path, window.location.origin).href;
-      const res = await fetch(url, {
+      const res = await safeFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...pendingAction, pin })

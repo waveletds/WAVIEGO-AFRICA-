@@ -1,6 +1,6 @@
 {
   "name": "Waviego Africa",
   "description": "An AI-powered WhatsApp banking platform that allows users to perform banking operations using conversational AI.",
-  "requestFramePermissions": ["microphone"],
+  "requestFramePermissions": ["microphone", "camera", "geolocation"],
   "majorCapabilities": []
 }
